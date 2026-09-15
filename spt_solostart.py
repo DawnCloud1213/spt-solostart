@@ -54,6 +54,7 @@ START_SERVER      = True
 START_LAUNCHER    = True
 SERVER_WAIT_SECS  = 150                       # 等 6969 监听的上限（秒）
 AUTO_CONNECT_LOCAL = True                     # 把 Launcher 自动连接目标切到本地服务器
+SERVER_NEW_CONSOLE = True                     # 服务端强制新开独立控制台窗口（方便主人看报错；关掉就看不到实时刷屏了）
 
 RUNTIME_REL           = Path("SPT_Runtime")
 LAUNCHER_SETTINGS_REL = RUNTIME_REL / "user" / "Launcher" / "LauncherSettings.json"
@@ -102,7 +103,7 @@ def _msgbox(text: str, title: str = "SPT 单机启动"):
 def load_config():
     global SPT_PORT, LOCAL_SERVER_ID, PROFILE_ID, SYNC_PROFILE, EXTRA_SOURCE_DIRS, \
         ONLY_IF_NEWER, BACKUP_DIR_REL, KEEP_BACKUPS, START_SERVER, START_LAUNCHER, \
-        SERVER_WAIT_SECS, AUTO_CONNECT_LOCAL, CFG
+        SERVER_WAIT_SECS, AUTO_CONNECT_LOCAL, SERVER_NEW_CONSOLE, CFG
     cfg_path = Path(__file__).resolve().parent / "config.json"
     if cfg_path.exists():
         try:
@@ -122,6 +123,7 @@ def load_config():
     START_LAUNCHER     = bool(CFG.get("start_launcher", START_LAUNCHER))
     SERVER_WAIT_SECS   = int(CFG.get("server_wait_seconds", SERVER_WAIT_SECS))
     AUTO_CONNECT_LOCAL = bool(CFG.get("auto_connect_local", AUTO_CONNECT_LOCAL))
+    SERVER_NEW_CONSOLE = bool(CFG.get("server_new_console", SERVER_NEW_CONSOLE))
 
 
 def _run_capture(cmd, timeout=30):
@@ -409,10 +411,19 @@ def start_server_and_launcher():
             _msgbox(f"找不到 SPT 服务端：\n{server_exe}")
             return
         if DRY_RUN:
-            log(f"[DRY-RUN] 应启动服务端: {server_exe}")
+            log(f"[DRY-RUN] 应启动服务端: {server_exe}"
+                f"{'（新开独立控制台窗口）' if SERVER_NEW_CONSOLE else ''}")
         else:
-            log(f"启动服务端: {server_exe}")
-            subprocess.Popen([str(server_exe)], cwd=str(server_exe.parent))
+            log(f"启动服务端: {server_exe}"
+                f"{'（新开独立控制台窗口，方便查看报错）' if SERVER_NEW_CONSOLE else ''}")
+            log("  （Win11 默认会把新控制台交给 Windows Terminal 托管：窗口/标签页标题是服务端自己设的"
+                "构建名，例如「SPT 4.1.5」；找不到窗口就 Alt+Tab 或看任务栏）")
+            # CREATE_NEW_CONSOLE：无论脚本是从快捷方式(pythonw)还是终端启动，
+            # 都保证服务端拥有自己的窗口 —— 主人能实时看到启动日志与报错。
+            flags = 0
+            if os.name == "nt" and SERVER_NEW_CONSOLE:
+                flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+            subprocess.Popen([str(server_exe)], cwd=str(server_exe.parent), creationflags=flags)
             t0 = time.time()
             while time.time() - t0 < SERVER_WAIT_SECS:
                 if port_listening(SPT_PORT):
@@ -421,7 +432,10 @@ def start_server_and_launcher():
                 time.sleep(1.0)
             else:
                 log(f"!! 等待服务端监听超时（{SERVER_WAIT_SECS}s）")
-                _msgbox(f"服务端 {SERVER_WAIT_SECS} 秒内未就绪。\n\n请查看服务端窗口的报错信息。")
+                _msgbox(f"服务端 {SERVER_WAIT_SECS} 秒内未就绪。\n\n"
+                        f"① 先看服务端控制台窗口（黑色窗口）里的报错\n"
+                        f"② 服务端日志：\n{SPT_ROOT / RUNTIME_REL / 'user' / 'logs' / 'spt'}\n"
+                        f"③ 本工具日志：\n{SPT_ROOT / LOG_REL / 'spt_solostart.log'}")
 
     if not START_LAUNCHER:
         log("按配置不启动 Launcher")
@@ -434,7 +448,10 @@ def start_server_and_launcher():
         log(f"[DRY-RUN] 应启动 Launcher: {launcher_exe}")
         return
     log(f"启动 Launcher: {launcher_exe}")
-    subprocess.Popen([str(launcher_exe)], cwd=str(launcher_exe.parent))
+    # Launcher 是 WebView2 GUI（自己的日志在 user\logs\Launcher.log）；
+    # 输出重定向到 NUL，免得它拖住调用终端/父进程的管道。
+    subprocess.Popen([str(launcher_exe)], cwd=str(launcher_exe.parent),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log("✅ Launcher 已启动（会自动连本地服务器并登录档案，点「开始游戏」即可）")
 
 

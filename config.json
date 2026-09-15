@@ -11,5 +11,6 @@
   "server_wait_seconds": 150,
   "spt_port": 6969,
   "local_server_id": "1721162719",
-  "auto_connect_local": true
+  "auto_connect_local": true,
+  "server_new_console": true
 }

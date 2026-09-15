@@ -60,6 +60,7 @@ D:\free games\EFT_0821\           ← SPT 根（含 SPT_Runtime、EscapeFromTark
 | `keep_backups` | `20` | 只保留最近 N 份**本工具自建**的备份 |
 | `start_server` | `true` | 是否启动 SPT 服务端 |
 | `start_launcher` | `true` | 是否启动 Launcher |
+| `server_new_console` | `true` | 服务端**强制新开独立控制台窗口**（就是那个黑窗口）。开着才能实时看启动日志/报错；关掉的话出问题只能翻日志文件 |
 | `server_wait_seconds` | `150` | 等服务端就绪的上限 |
 | `spt_port` | `6969` | 本地服务端口 |
 | `local_server_id` | `1721162719` | SPT Launcher 内置「本地服务器」的 ServerId（由 `sp-tarkov/launcher` 源码 `Server.LocalServerId` 得出，一般不用改） |
@@ -76,7 +77,15 @@ D:\free games\EFT_0821\           ← SPT 根（含 SPT_Runtime、EscapeFromTark
 
 ## 排障
 
+- **服务端窗口**：双击启动后会出现一个独立的控制台窗口（`SPT.Server.exe`），
+  里面实时刷 `服务端已开启，游戏愉快` / 请求日志 / 报错。看到它 = 服务端起得来。
+  ⚠️ 在 Win11 上这个窗口通常**由 Windows Terminal 托管**，标题是服务端自己设的构建名
+  （如 **`SPT 4.1.5`**），任务栏/Alt+Tab 里显示的也是这个名字 —— 不是「找不到窗口」，
+  窗口本来就不属于服务端进程（所以用 `Get-Process SPT.Server` 看 `MainWindowHandle` 会是 0）。
+  （若被 `server_new_console:false` 关掉了，就只能看日志文件了。）
 - 日志：`<SPT根>\SPT_Runtime\user\sptappdata\spt_solostart_logs\spt_solostart.log`
+- 服务端自己的日志：`<SPT根>\SPT_Runtime\user\logs\spt\spt<日期>.log`
+- Launcher 日志：`<SPT根>\SPT_Runtime\user\logs\Launcher.log`
 - 「检测到进程在运行 → 跳过存档同步」：先完全退出游戏 / 服务端 / 启动器，再双击
 - 「没找到任何可用的存档来源」：先去游戏里点一次「下载存档」；或把存档所在文件夹填进 `extra_source_dirs`
 - 「等待服务端监听超时」：看 SPT.Server.exe 窗口的报错（多半是 .NET 运行库或端口占用）
