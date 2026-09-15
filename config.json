@@ -1,0 +1,15 @@
+{
+  "_comment": "spt_solostart 配置。脚本位于 <SPT根>\\SPTSoloStart\\，SPT_ROOT 自动推导（=脚本上一级），换电脑只需把整个 SPTSoloStart 文件夹随游戏搬走。",
+  "profile_id": "",
+  "sync_profile": true,
+  "extra_source_dirs": [],
+  "only_if_newer": true,
+  "backup_dir": "SPT_Runtime/user/profiles/backups_manual",
+  "keep_backups": 20,
+  "start_server": true,
+  "start_launcher": true,
+  "server_wait_seconds": 150,
+  "spt_port": 6969,
+  "local_server_id": "1721162719",
+  "auto_connect_local": true
+}
