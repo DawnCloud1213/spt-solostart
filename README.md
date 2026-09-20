@@ -49,7 +49,7 @@ D:\free games\EFT_0821\           ← SPT 根（含 SPT_Runtime、EscapeFromTark
     ├── spt_solostart.py
     ├── spt_solostart.bat         ← 双击入口（静默）
     ├── dry_run.bat               ← 干跑检查（只看判定，不写不启）
-    ├── test_solo_guard.py        ← 自检（15 项，只读+临时目录）
+    ├── test_solo_guard.py        ← 自检（18 项断言，只读+临时目录）
     ├── config.json
     └── README.md
 ```
@@ -146,7 +146,7 @@ cd <SPT根>\SPTSoloStart
 python test_solo_guard.py
 ```
 
-15 项断言：端口占用者识别（起一个假占用者验证 netstat→PID→进程名→路径→启动时间整条链路）、
+18 项断言：端口占用者识别（起一个假占用者验证 netstat→PID→进程名→路径→启动时间整条链路）、
 四种分支判定（本目录服务端 / 外人占用 / guard 关闭 / dry-run 不弹窗）、
 中文路径乱码时的退化比对、备份滚动与「老 `.bak` 永不动」。
 **只读 + 只用系统临时目录**：不写游戏档案、不启服务端/Launcher、不碰真实 `LauncherSettings.json`。
