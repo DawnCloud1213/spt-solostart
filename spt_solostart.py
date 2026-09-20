@@ -11,23 +11,27 @@ Fika 联机结束后在游戏里点「下载存档」，档案落在：
 两条路径不自动对接 → 单机启动总是读到联机之前的旧档，还被旧档回写钉死。
 
 【本脚本做什么】双击桌面「SPT单机启动」：
-  1) 安全检查：SPT/游戏进程在跑 → 跳过同步（防内存旧档回写覆盖新档）
+  1) 安全检查：SPT/游戏进程在跑 → 弹窗拦住，由主人决定「中止」还是「明知用旧档也要继续」
   2) 选最新的「自己的档」：fika 下载档 / 本地档 / 可选额外目录（比 mtime）
   3) 比本地新 → 先备份本地档 → 覆盖到 profiles\\<id>.json
   4) 把 Launcher 自动连接目标指向「本地服务器」（ServerId=1721162719）
-  5) 启 SPT.Server.exe → 等 6969 监听 → 启 SPT.Launcher.exe
+  5) 启服务端前先验 6969 端口占用者身份（必须就是本目录的 SPT.Server.exe）
+  6) 启 SPT.Server.exe → 等 6969 监听 → 启 SPT.Launcher.exe
 
 【写入边界（硬规矩）】
-  只写这四处：
+  只写这几处：
     - SPT_Runtime\\user\\profiles\\<自己的 profileId>.json
     - SPT_Runtime\\user\\profiles\\backups_manual\\（自建备份目录）
     - SPT_Runtime\\user\\sptappdata\\spt_solostart_logs\\（自建日志）
     - SPT_Runtime\\user\\Launcher\\LauncherSettings.json（仅改 PreferredProfile / AutoConnectLastProfile）
-  绝不删除任何既有文件；只处理自己的 profileId，别人的档案一概不碰。
+    - SPT_Runtime\\user\\Launcher\\LauncherSettings.json.<时间戳>.bak（自建备份）
+  绝不删除任何既有文件；自建备份按 keep_* 上限滚动清理（只清理本工具自己生成的）。
+  只处理自己的 profileId，别人的档案一概不碰。
 
 用法：
-    python spt_solostart.py              # 正常跑
+    python spt_solostart.py              # 正常跑（遇到可疑情况弹窗确认）
     python spt_solostart.py --dry-run    # 只判定不写入、不启动（验证用）
+    python spt_solostart.py --yes        # 所有确认环节自动选「继续」（自动化/批量用）
 """
 
 import hashlib
@@ -55,6 +59,9 @@ START_LAUNCHER    = True
 SERVER_WAIT_SECS  = 150                       # 等 6969 监听的上限（秒）
 AUTO_CONNECT_LOCAL = True                     # 把 Launcher 自动连接目标切到本地服务器
 SERVER_NEW_CONSOLE = True                     # 服务端强制新开独立控制台窗口（方便主人看报错；关掉就看不到实时刷屏了）
+CONFIRM_ON_SKIP_PROCESS = True                # 检测到进程在跑 → 弹窗确认（关掉=只记日志、默默用旧档继续）
+PORT_OWNER_GUARD        = True                # 6969 被「不是本目录的服务端」占用 → 弹窗拦截（关掉=仅警告）
+KEEP_LAUNCHER_BACKUPS   = 10                  # LauncherSettings 时间戳备份保留份数（只清理本工具自己生成的）
 
 RUNTIME_REL           = Path("SPT_Runtime")
 LAUNCHER_SETTINGS_REL = RUNTIME_REL / "user" / "Launcher" / "LauncherSettings.json"
@@ -71,6 +78,7 @@ SCAN_MAX_FILES   = 25                  # 每个额外目录最多内容校验多
 # ==============================================================================
 
 DRY_RUN = "--dry-run" in sys.argv
+ASSUME_YES = ("--yes" in sys.argv) or ("-y" in sys.argv)   # 所有确认环节自动选「继续」
 CFG = {}
 SPT_ROOT = Path(__file__).resolve().parent.parent   # 脚本位于 <SPT根>/SPTSoloStart/
 
@@ -100,10 +108,39 @@ def _msgbox(text: str, title: str = "SPT 单机启动"):
         pass
 
 
+def _ask_yes_no(text: str, title: str = "SPT 单机启动", default_yes: bool = False) -> bool:
+    """弹窗二选一：True=继续 / False=中止。
+
+    - --yes：直接「继续」（自动化/批量场景）
+    - 非 Windows / 无桌面 / 弹窗失败：按 default_yes 返回，并记日志，绝不静默吞掉
+    """
+    if ASSUME_YES:
+        log("  （--yes：确认环节自动选择「继续」）")
+        return True
+    if os.name != "nt":
+        log(f"  !! 非 Windows 环境，无法弹窗确认 → 按默认「{'继续' if default_yes else '中止'}」处理")
+        return default_yes
+    try:
+        import ctypes
+        MB_YESNO, MB_ICONWARNING, MB_DEFBUTTON2, IDYES = 0x04, 0x30, 0x100, 6
+        # MB_DEFBUTTON2 → 回车默认落在「否」，避免手滑直接带旧档开跑
+        r = ctypes.windll.user32.MessageBoxW(0, text, title,
+                                             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2)
+        if r == IDYES:
+            log("  确认：继续")
+            return True
+        log("  确认：中止（未做任何写入，未启动任何程序）")
+        return False
+    except Exception as e:
+        log(f"  !! 弹窗确认失败（{e}）→ 按默认「{'继续' if default_yes else '中止'}」处理")
+        return default_yes
+
+
 def load_config():
     global SPT_PORT, LOCAL_SERVER_ID, PROFILE_ID, SYNC_PROFILE, EXTRA_SOURCE_DIRS, \
         ONLY_IF_NEWER, BACKUP_DIR_REL, KEEP_BACKUPS, START_SERVER, START_LAUNCHER, \
-        SERVER_WAIT_SECS, AUTO_CONNECT_LOCAL, SERVER_NEW_CONSOLE, CFG
+        SERVER_WAIT_SECS, AUTO_CONNECT_LOCAL, SERVER_NEW_CONSOLE, \
+        CONFIRM_ON_SKIP_PROCESS, PORT_OWNER_GUARD, KEEP_LAUNCHER_BACKUPS, CFG
     cfg_path = Path(__file__).resolve().parent / "config.json"
     if cfg_path.exists():
         try:
@@ -124,6 +161,9 @@ def load_config():
     SERVER_WAIT_SECS   = int(CFG.get("server_wait_seconds", SERVER_WAIT_SECS))
     AUTO_CONNECT_LOCAL = bool(CFG.get("auto_connect_local", AUTO_CONNECT_LOCAL))
     SERVER_NEW_CONSOLE = bool(CFG.get("server_new_console", SERVER_NEW_CONSOLE))
+    CONFIRM_ON_SKIP_PROCESS = bool(CFG.get("confirm_on_skip_process", CONFIRM_ON_SKIP_PROCESS))
+    PORT_OWNER_GUARD        = bool(CFG.get("port_owner_guard", PORT_OWNER_GUARD))
+    KEEP_LAUNCHER_BACKUPS   = int(CFG.get("keep_launcher_backups", KEEP_LAUNCHER_BACKUPS))
 
 
 def _run_capture(cmd, timeout=30):
@@ -162,6 +202,110 @@ def port_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> 
             s.close()
         except Exception:
             pass
+
+
+def _b64_ps(script: str, timeout: int = 25):
+    """跑一段 PowerShell，输出按 UTF-8→base64 取回（规避中文路径/代码页乱码）"""
+    import base64
+    wrapper = (script +
+               ";if($o.Count){[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($o -join \"`n\")))}")
+    out = _run_capture(["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapper],
+                       timeout=timeout).strip()
+    if not out:
+        return []
+    try:
+        text = base64.b64decode(out).decode("utf-8", "replace")
+    except Exception:
+        return []
+    return [l.strip() for l in text.splitlines() if l.strip()]
+
+
+def _ps_exec_info(pid: int):
+    """用 PowerShell 取某进程的可执行路径 + 启动时间 → (path, start_time)，取不到给 (None, None)"""
+    script = ("$ErrorActionPreference='SilentlyContinue';$o=@();"
+              f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\";"
+              "if($p){$o+=$p.ExecutablePath;"
+              f"$s=(Get-Process -Id {pid}).StartTime;"
+              "if($s){$o+='START='+$s.ToString('yyyy-MM-dd HH:mm:ss')}}")
+    lines = _b64_ps(script)
+    if not lines:
+        return None, None
+    path, start = None, None
+    for l in lines:
+        if l.upper().startswith("START="):
+            start = l.split("=", 1)[1].strip()
+        elif not path:
+            path = l
+    return (path or None), start
+
+
+def _wmic_exec_path(pid: int):
+    """PowerShell 不可用时的兜底：wmic 取可执行路径（中文可能乱码，只信末两级）"""
+    out = _run_capture(["wmic", "process", "where", f"processid={pid}",
+                        "get", "ExecutablePath", "/value"], timeout=20)
+    for line in out.splitlines():
+        if line.strip().lower().startswith("executablepath="):
+            v = line.split("=", 1)[1].strip()
+            if v:
+                return v
+    return None
+
+
+def port_owner(port: int):
+    """查出正在监听 <port> 的进程 → dict(pid, name, exe, start)；查不到返回 None"""
+    out = _run_capture(["netstat", "-ano", "-p", "TCP"], timeout=25)
+    pid = None
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        if parts[3].upper() == "LISTENING" and parts[1].endswith(f":{port}"):
+            pid = parts[4].strip()
+            break
+    if not pid or pid == "0":
+        return None
+
+    name = None
+    tl = _run_capture(["tasklist", "/NH", "/FO", "CSV", "/FI", f"PID eq {pid}"], timeout=25)
+    for line in (tl or "").splitlines():
+        if line.strip():
+            name = line.split('","')[0].lstrip('"').strip()
+            break
+
+    exe, start = _ps_exec_info(int(pid))
+    if not exe:
+        exe = _wmic_exec_path(int(pid))
+    if not name and exe:
+        name = os.path.basename(exe)
+    return {"pid": pid, "name": name or "?", "exe": exe, "start": start}
+
+
+def describe_owner(o) -> str:
+    """把 port_owner 结果写成一行人类可读的说明"""
+    if not o:
+        return "占用者未知（netstat 没给出 LISTENING 行）"
+    bits = [f"PID {o['pid']}", f"进程 {o['name']}"]
+    if o.get("start"):
+        bits.append(f"启动于 {o['start']}")
+    bits.append(f"路径 {o['exe']}" if o.get("exe") else "路径取不到（权限不足？）")
+    return "｜".join(bits)
+
+
+def _same_exe(path, target: Path) -> bool:
+    """判断监听进程是不是「本目录的」那个 exe（中文路径乱码时退化成比对末尾两级）"""
+    if not path:
+        return False
+    try:
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(str(target))):
+            return True
+    except Exception:
+        pass
+    try:
+        a = [p.lower() for p in Path(str(path)).parts[-2:]]
+        b = [p.lower() for p in Path(str(target)).parts[-2:]]
+        return len(a) == 2 and a == b
+    except Exception:
+        return False
 
 
 def sha256_of(path: Path) -> str:
@@ -361,6 +505,32 @@ def sync_profile(profile_id: str):
 
 # --------------------------- Launcher 自动连本地 ---------------------------
 
+def prune_launcher_backups(launcher_dir: Path):
+    """只清理本工具生成的时间戳备份 LauncherSettings.json.<时间戳>.bak（老的 .bak 不动）"""
+    if KEEP_LAUNCHER_BACKUPS <= 0 or not launcher_dir.is_dir():
+        return
+    files = sorted(launcher_dir.glob(f"LauncherSettings.json.*.bak"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in files[KEEP_LAUNCHER_BACKUPS:]:
+        try:
+            p.unlink()
+            log(f"  (清理旧 LauncherSettings 备份 {p.name})")
+        except Exception as e:
+            log(f"  !! 清理旧 LauncherSettings 备份失败 {p.name}: {e}")
+
+
+def backup_launcher_settings(settings_path: Path):
+    """改 LauncherSettings 前留一份带时间戳的备份（不再每次覆盖同一个 .bak）"""
+    try:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = settings_path.parent / f"{settings_path.name}.{stamp}.bak"
+        bak.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
+        log(f"  已备份 LauncherSettings -> {bak.name}")
+        prune_launcher_backups(settings_path.parent)
+    except Exception as e:
+        log(f"  !! 备份 LauncherSettings 失败（继续修改，但请留意）: {e}")
+
+
 def set_auto_connect_local(settings_path: Path, profile_id: str):
     """把 PreferredProfile 指向内置本地服务器；顺带确保「自动连接」开着"""
     if not settings_path.exists():
@@ -384,11 +554,7 @@ def set_auto_connect_local(settings_path: Path, profile_id: str):
         log(f"[DRY-RUN] 应把 Launcher 自动连接目标设为 本地服务器({LOCAL_SERVER_ID}) / {profile_id}")
         return True
 
-    try:
-        (settings_path.parent / f"{settings_path.name}.bak").write_text(
-            settings_path.read_text(encoding="utf-8"), encoding="utf-8")
-    except Exception:
-        pass
+    backup_launcher_settings(settings_path)
 
     data["PreferredProfile"] = {"ServerId": LOCAL_SERVER_ID, "ProfileId": profile_id}
     data["AutoConnectLastProfile"] = True
@@ -399,17 +565,63 @@ def set_auto_connect_local(settings_path: Path, profile_id: str):
 
 # ------------------------------- 启动流程 -------------------------------
 
+def check_port_owner(server_exe: Path) -> bool:
+    """6969 已在监听时，先确认占用者是不是「本目录的」服务端。
+
+    True  = 可以继续（视为本地服务端已在跑，不再另起）
+    False = 占用者是别的东西 → 中止整个启动（连上去就是连错服务器）
+    """
+    owner = port_owner(SPT_PORT)
+    desc = describe_owner(owner)
+
+    if owner and _same_exe(owner.get("exe"), server_exe):
+        log(f"本地服务端已在运行（127.0.0.1:{SPT_PORT} 监听中）→ 跳过启动服务端")
+        log(f"  占用者：{desc}")
+        return True
+
+    if owner and not owner.get("exe"):
+        if (owner.get("name") or "").lower() == "spt.server.exe":
+            log(f"本地服务端已在运行（127.0.0.1:{SPT_PORT} 监听中；路径读不到，靠进程名确认）→ 跳过启动服务端")
+            log(f"  占用者：{desc}")
+            return True
+        log(f"!! {SPT_PORT} 被占用，且进程名不是 SPT.Server.exe：{desc}")
+    else:
+        log(f"!! {SPT_PORT} 被占用，占用者不是本目录的服务端：{desc}")
+
+    if not PORT_OWNER_GUARD:
+        log("   （port_owner_guard=false → 仅警告，继续）")
+        return True
+    if DRY_RUN:
+        log("[DRY-RUN] 应弹窗拦截（6969 被非本目录的服务端占用）")
+        return True
+
+    body = (f"{SPT_PORT} 端口已被占用，但占用者不是本目录的服务端：\n\n"
+            f"PID：{owner['pid'] if owner else '?'}\n"
+            f"进程：{owner['name'] if owner else '?'}\n"
+            f"路径：{(owner.get('exe') if owner else None) or '读不到'}\n"
+            f"启动于：{(owner.get('start') if owner else None) or '未知'}\n\n"
+            f"现在启动 Launcher 会连上这个「不知道是谁」的服务器，\n"
+            f"可能跑到别的档、或把档案写到别处。\n\n"
+            f"建议先把残留的联机服务端关干净，再重新双击本工具。\n\n"
+            f"仍要继续启动吗？")
+    if _ask_yes_no(body):
+        return True
+    log(f"已中止：{SPT_PORT} 被非本目录的服务端占用（未启动任何程序）")
+    return False
+
+
 def start_server_and_launcher():
     server_exe = SPT_ROOT / SERVER_EXE_REL
     launcher_exe = SPT_ROOT / LAUNCHER_EXE_REL
 
     if port_listening(SPT_PORT):
-        log(f"本地服务端已在运行（127.0.0.1:{SPT_PORT} 已在监听），跳过启动服务端")
+        if not check_port_owner(server_exe):
+            return False
     elif START_SERVER:
         if not server_exe.exists():
             log(f"!! 找不到服务端: {server_exe}")
             _msgbox(f"找不到 SPT 服务端：\n{server_exe}")
-            return
+            return False
         if DRY_RUN:
             log(f"[DRY-RUN] 应启动服务端: {server_exe}"
                 f"{'（新开独立控制台窗口）' if SERVER_NEW_CONSOLE else ''}")
@@ -439,20 +651,21 @@ def start_server_and_launcher():
 
     if not START_LAUNCHER:
         log("按配置不启动 Launcher")
-        return
+        return True
     if not launcher_exe.exists():
         log(f"!! 找不到 Launcher: {launcher_exe}")
         _msgbox(f"找不到 SPT Launcher：\n{launcher_exe}")
-        return
+        return False
     if DRY_RUN:
         log(f"[DRY-RUN] 应启动 Launcher: {launcher_exe}")
-        return
+        return True
     log(f"启动 Launcher: {launcher_exe}")
     # Launcher 是 WebView2 GUI（自己的日志在 user\logs\Launcher.log）；
     # 输出重定向到 NUL，免得它拖住调用终端/父进程的管道。
     subprocess.Popen([str(launcher_exe)], cwd=str(launcher_exe.parent),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log("✅ Launcher 已启动（会自动连本地服务器并登录档案，点「开始游戏」即可）")
+    return True
 
 
 def main():
@@ -475,8 +688,20 @@ def main():
     if SYNC_PROFILE:
         procs = running_processes()
         if procs:
-            log(f"!! 检测到进程在运行: {', '.join(sorted(procs))} → 跳过存档同步（避免内存旧档回写覆盖新档）")
+            names = ", ".join(sorted(procs))
+            log(f"!! 检测到进程在运行: {names} → 跳过存档同步（避免内存旧档回写覆盖新档）")
             log("   （想同步新档请先完全退出游戏/服务端/启动器，再双击本工具）")
+            if CONFIRM_ON_SKIP_PROCESS:
+                if DRY_RUN:
+                    log("[DRY-RUN] 应弹窗确认「是否仍要继续启动（用旧档）」")
+                elif not _ask_yes_no(
+                        f"检测到这些进程还在运行：\n\n{names}\n\n"
+                        f"为避免内存里的旧档回写覆盖新档，本次【不会】同步存档；\n"
+                        f"现在启动的话，游戏读的是上一次的档案。\n\n"
+                        f"建议先完全退出 游戏 / 服务端 / 启动器，再重新双击本工具。\n\n"
+                        f"仍要继续启动吗（用旧档）？", default_yes=False):
+                    log("已中止：未做任何写入，未启动任何程序")
+                    return 4
         else:
             sync_profile(profile_id)
     else:
@@ -487,7 +712,9 @@ def main():
         set_auto_connect_local(settings_path, profile_id)
 
     # ---- 启动 ----
-    start_server_and_launcher()
+    if not start_server_and_launcher():
+        log("=" * 20 + " 已中止 " + "=" * 20)
+        return 5
     log("=" * 20 + " 完成 " + "=" * 20)
     return 0
 
