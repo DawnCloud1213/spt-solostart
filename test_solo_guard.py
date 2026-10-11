@@ -122,6 +122,88 @@ check("主人原有的 LauncherSettings.json.bak 仍在", legacy.exists(), True)
 check("原 LauncherSettings.json 未被备份逻辑破坏", settings.exists(), True)
 shutil.rmtree(tmp, ignore_errors=True)
 
+print("\n=== 5) 多落点扫描 + 经验判据（在临时目录造档，绝不碰真实档案）===")
+import json as _json
+
+tmp = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "solo_sync_test"
+if tmp.exists():
+    shutil.rmtree(tmp)
+
+
+def _mk(path, aid, pmc_exp, scav_exp=0, pid="testpid"):
+    """造一份最小可用的假档案"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({
+        "info": {"aid": aid, "id": pid, "username": "Tester"},
+        "characters": {
+            "pmc": {"Info": {"Level": 1, "Experience": pmc_exp},
+                    "Inventory": {"items": []}, "Quests": []},
+            "scav": {"Info": {"Level": 1, "Experience": scav_exp}},
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+# 把被测脚本隔离到临时 SPT 根，绝不碰真实游戏目录
+m.SPT_ROOT = tmp
+m.FIKA_SOURCE_DIRS_REL = [Path("SPT_Runtime") / "user" / "fika", Path("SPT") / "user" / "fika"]
+m.FIKA_SOURCE_DIRS = []
+m.EXTRA_SOURCE_DIRS = []
+m.PROFILES_REL = Path("SPT_Runtime") / "user" / "profiles"
+m.BACKUP_DIR_REL = "SPT_Runtime/user/profiles/backups_manual"
+m.KEEP_BACKUPS = 20
+m.ONLY_IF_NEWER = True
+m.ALLOW_EXP_ROLLBACK = False
+m.DRY_RUN = False
+
+old_fika = _mk(tmp / "SPT" / "user" / "fika" / "testpid" / "testpid.json", 111, 1000)
+new_fika = _mk(tmp / "SPT_Runtime" / "user" / "fika" / "testpid" / "testpid.json", 111, 9000)
+local = _mk(tmp / "SPT_Runtime" / "user" / "profiles" / "testpid.json", 111, 5000)
+# ⭐ 关键反例：把「内容更旧」的档 mtime 刷成未来 → 纯 mtime 逻辑会错选它
+_future = time.time() + 600
+os.utime(old_fika, (_future, _future))
+
+check("fika_roots 扫到 2 个候选落点", len(m.fika_roots()), 2)
+cands = m.find_source_candidates("testpid")
+check("候选 2 份", len(cands), 2)
+check("经验最高的排第一（哪怕它 mtime 更旧）", cands[0][0].parts[-5], "SPT_Runtime")
+check("mtime 被刷成未来的旧档排最后", cands[-1][0].parts[-5], "SPT")
+check("进度指纹：经验优先于 mtime",
+      m.profile_progress(m.read_profile_meta(old_fika))
+      < m.profile_progress(m.read_profile_meta(new_fika)), True)
+check("read_profile_meta 读到 aid/pmc 经验",
+      (m.read_profile_meta(new_fika)["aid"], m.read_profile_meta(new_fika)["pmc_exp"]), (111, 9000))
+
+print("\n  -- 场景 A：同账号 + 来源经验更高 → 覆盖并备份 --")
+m.sync_profile("testpid")
+check("覆盖后本地经验 = 9000", m.read_profile_meta(local)["pmc_exp"], 9000)
+check("旧档已备份 1 份",
+      len(list((tmp / m.BACKUP_DIR_REL).glob("*_testpid.json"))), 1)
+
+print("\n  -- 场景 B：来源经验倒退（更旧内容却「时间更新」）→ 硬闸拒绝 --")
+shutil.rmtree(tmp / "SPT_Runtime" / "user" / "fika", ignore_errors=True)
+shutil.rmtree(tmp / "SPT" / "user" / "fika", ignore_errors=True)
+local2 = _mk(tmp / "SPT_Runtime" / "user" / "profiles" / "testpid.json", 111, 5000)
+stale = _mk(tmp / "SPT" / "user" / "fika" / "testpid" / "testpid.json", 111, 1000)
+_f2 = time.time() + 1200
+os.utime(stale, (_f2, _f2))
+m.sync_profile("testpid")
+check("经验倒退被拒绝（本地仍是 5000）", m.read_profile_meta(local2)["pmc_exp"], 5000)
+
+print("\n  -- 场景 C：候选属于别的账号 → 串档拦截 --")
+shutil.rmtree(tmp / "SPT" / "user" / "fika", ignore_errors=True)
+_mk(tmp / "SPT" / "user" / "fika" / "testpid" / "testpid.json", 999, 99999)
+check("串档时放弃同步（返回 None）", m.sync_profile("testpid"), None)
+check("串档后本地经验仍是 5000", m.read_profile_meta(local2)["pmc_exp"], 5000)
+
+print("\n  -- 场景 D：同账号 + 经验更高 → 正常覆盖 --")
+shutil.rmtree(tmp / "SPT" / "user" / "fika", ignore_errors=True)
+_mk(tmp / "SPT_Runtime" / "user" / "fika" / "testpid" / "testpid.json", 111, 9000)
+m.sync_profile("testpid")
+check("覆盖后本地经验 = 9000", m.read_profile_meta(local2)["pmc_exp"], 9000)
+
+shutil.rmtree(tmp, ignore_errors=True)
+
 print("\n" + ("=" * 46))
 print("全部通过 ✨" if not fail else f"失败项: {fail}")
 sys.exit(1 if fail else 0)

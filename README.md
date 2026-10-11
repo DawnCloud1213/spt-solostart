@@ -7,10 +7,12 @@
 
 ## 一、为什么需要它
 
-联机结束后，主人在游戏里点「**下载存档**」，档案落在：
+联机结束后，主人在游戏里点「**下载存档**」，档案落在「服务端根 \ user \ fika」——
+注意**服务端根会随 SPT 安装结构漂移**，所以下面两个候选落点都会扫：
 
 ```
-<SPT根>\SPT\user\fika\<profileId>\<profileId>.json      ← 联机下载档（快照）
+<SPT根>\SPT_Runtime\user\fika\<profileId>\<profileId>.json   ← 现行落点（SPT 4.1.x：服务端在 SPT_Runtime\）
+<SPT根>\SPT\user\fika\<profileId>\<profileId>.json           ← 旧结构落点（服务端曾在游戏根的 SPT\ 里）
 ```
 
 而单机（自建服）实际读 / 写的是**另一条路径**：
@@ -27,10 +29,10 @@
 | # | 步骤 | 关卡 |
 |---|------|------|
 | 1 | 结构自检：`SPT_Runtime\` 在不在 | 不符 → 弹窗报错退出 |
-| 2 | 推导 `profileId`：`config.profile_id` → `LauncherSettings.PreferredProfile` → `SPT\user\fika` 里最新的目录 | 推不出 → 弹窗报错退出 |
+| 2 | 推导 `profileId`：`config.profile_id` → `LauncherSettings.PreferredProfile` → 各「下载存档」落点里**进度最新**的目录 | 推不出 → 弹窗报错退出 |
 | 3 | **进程闸门**：检测 `SPT.Server.exe` / `SPT.Launcher.exe` / `EscapeFromTarkov.exe` 在不在跑 | 在跑 → **弹窗**问「明知用旧档也要继续吗」，默认落「否」 |
-| 4 | 选最新的「自己的档」：Fika 下载档 / 本地档 / `extra_source_dirs`（比 mtime） | 一个来源都没有 → 不覆盖，只启动 |
-| 5 | 判定要不要覆盖：内容一致 / 本地更新 → 不动；来源更新 → **先备份**再覆盖 | JSON 不合法 / id 不匹配 → 拒绝覆盖 |
+| 4 | 选最新的「自己的档」：各「下载存档」落点（`SPT_Runtime\user\fika`、`SPT\user\fika`、`user\fika`）/ 本地档 / `extra_source_dirs`，按**进度指纹**排序（PMC 经验 → Scav 经验 → mtime） | 一个来源都没有 → 不覆盖，只启动 |
+| 5 | 判定要不要覆盖：内容一致 / 本地不落后 → 不动；来源进度更新 → **先备份**再覆盖 | JSON 不合法 / `id` 不匹配 / **aid 不是本账号** / **经验倒退** → 拒绝覆盖 |
 | 6 | 把 Launcher 自动连接目标切到「本地服务器」(`ServerId=1721162719`) | 改前留带时间戳的备份 |
 | 7 | 起服务端前先**验 6969 占用者身份** | 占用者不是本目录的服务端 → **弹窗**拦截 |
 | 8 | 启 `SPT.Server.exe` → 等 `127.0.0.1:6969` 监听成功 → 启 `SPT.Launcher.exe` | 超时 → 弹窗给三条查错路径 |
@@ -42,14 +44,15 @@
 ```
 D:\free games\EFT_0821\           ← SPT 根（含 SPT_Runtime、EscapeFromTarkov.exe）
 ├── SPT_Runtime\
+│   └── user\fika\                ← Fika「下载存档」现行落点（只读，本工具不删）
 ├── EscapeFromTarkov.exe
-├── SPT\user\fika\                ← Fika「下载存档」落点（只读，本工具不删）
+├── SPT\user\fika\                ← 旧结构落点（服务端曾在此；只作兼容扫描，只读）
 ├── FikaAutoConnect\              ← 联机工具
 └── SPTSoloStart\                 ← 本工具（新建文件夹）
     ├── spt_solostart.py
     ├── spt_solostart.bat         ← 双击入口（静默）
     ├── dry_run.bat               ← 干跑检查（只看判定，不写不启）
-    ├── test_solo_guard.py        ← 自检（18 项断言，只读+临时目录）
+    ├── test_solo_guard.py        ← 自检（30 项断言，只读+临时目录）
     ├── config.json
     └── README.md
 ```
@@ -74,10 +77,12 @@ python spt_solostart.py --yes        # 所有确认环节自动选「继续」�
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `profile_id` | `""` | 留空=自动（LauncherSettings.PreferredProfile → `SPT\user\fika` 里最新的目录） |
+| `profile_id` | `""` | 留空=自动（LauncherSettings.PreferredProfile → 各「下载存档」落点里进度最新者的目录名） |
 | `sync_profile` | `true` | 是否启用存档同步（false = 纯启动器） |
-| `extra_source_dirs` | `[]` | 额外存档来源目录。填了就会一起比时间（例：QQ 接收文件夹 / 下载夹）。文件名带 profileId 的按名匹配，不带的按内容识别（只查最近 25 个 json） |
-| `only_if_newer` | `true` | 仅当来源比本地档新才覆盖（**建议保持 true**：单机玩完后再启动，不会用旧下载档把新进度冲掉） |
+| `fika_source_dirs` | `[]` | 「下载存档」额外落点（绝对路径或相对 SPT 根）。内置已含 `SPT_Runtime\user\fika`、`SPT\user\fika`、`user\fika`，一般不用填 |
+| `extra_source_dirs` | `[]` | 额外存档来源目录。填了就会一起比进度（例：QQ 接收文件夹 / 下载夹）。文件名带 profileId 的按名匹配，不带的按内容识别（只查最近 25 个 json） |
+| `only_if_newer` | `true` | 仅当来源**进度更新**才覆盖（**建议保持 true**：单机玩完后再启动，不会用旧下载档把新进度冲掉） |
+| `allow_exp_rollback` | `false` | 是否允许「来源 PMC 经验比本地低」也覆盖。默认 `false` = 硬闸拒绝（防复制/解压把旧档时间戳刷成「最新」造成回滚）。**只有明知要退档才开** |
 | `confirm_on_skip_process` | `true` | 检测到进程在跑时**弹窗确认**（false = 只记日志、默默用旧档继续） |
 | `port_owner_guard` | `true` | 6969 被「非本目录的服务端」占用时**弹窗拦截**（false = 仅警告） |
 | `backup_dir` | `SPT_Runtime/user/profiles/backups_manual` | 覆盖前备份落点（自建目录，不动原生 `backups\`、`bak\`） |
@@ -135,7 +140,8 @@ python spt_solostart.py --yes        # 所有确认环节自动选「继续」�
 - **绝不删除任何既有文件**；`keep_backups` / `keep_launcher_backups` 只清理**本工具自己生成的**文件
 - 只处理**自己的 profileId**，别人的档案一概不碰
 - 进程在跑 → 绝不同步（防止内存旧档回写覆盖新档）
-- 来源 JSON 解析失败 / 结构不像 SPT 档案 / id 不匹配 → 拒绝覆盖，宁可不用
+- 来源 JSON 解析失败 / 结构不像 SPT 档案 / id 不匹配 / **aid 不是本账号** → 拒绝覆盖，宁可不用
+- **来源 PMC 经验比本地低 → 默认拒绝覆盖**（`allow_exp_rollback` 才放行）：防「复制/解压把旧档时间戳刷成最新」的回滚陷阱
 - 幂等：内容一致就不动文件，可反复双击
 - `--dry-run` 全程无弹窗、无写入、无启动
 
@@ -146,9 +152,11 @@ cd <SPT根>\SPTSoloStart
 python test_solo_guard.py
 ```
 
-18 项断言：端口占用者识别（起一个假占用者验证 netstat→PID→进程名→路径→启动时间整条链路）、
+30 项断言：端口占用者识别（起一个假占用者验证 netstat→PID→进程名→路径→启动时间整条链路）、
 四种分支判定（本目录服务端 / 外人占用 / guard 关闭 / dry-run 不弹窗）、
-中文路径乱码时的退化比对、备份滚动与「老 `.bak` 永不动」。
+中文路径乱码时的退化比对、备份滚动与「老 `.bak` 永不动」、
+**多落点扫描 + 经验判据**（造两份下载档，故意把「内容更旧」的那份 mtime 刷成未来 →
+验证仍按经验正确排序；再加正常覆盖 / 经验倒退拦截 / 串档拦截三个场景）。
 **只读 + 只用系统临时目录**：不写游戏档案、不启服务端/Launcher、不碰真实 `LauncherSettings.json`。
 
 ## 九、排障
@@ -165,7 +173,8 @@ python test_solo_guard.py
 - **弹窗「检测到这些进程还在运行」**：正常闸门。想同步新档 → 点「否」，完全退出游戏/服务端/启动器，再双击
 - **弹窗「6969 端口已被占用…不是本目录的服务端」**：多半是残留的联机服务端或别的程序抢了端口。
   点「否」，`taskkill /F /PID <弹窗里的PID>` 或任务管理器结束它，再双击
-- 「没找到任何可用的存档来源」：先去游戏里点一次「下载存档」；或把存档所在文件夹填进 `extra_source_dirs`
+- 「没找到任何可用的存档来源」：先去游戏里点一次「下载存档」；或把存档所在文件夹填进 `fika_source_dirs` / `extra_source_dirs`
+- 「来源 PMC 经验比本地低 → 拒绝覆盖」：这是保护闸（防旧档回滚）。若确认那份下载档才是要用的（例：本地档被误改过），把 `allow_exp_rollback` 设 `true` 再跑一次
 - 「等待服务端监听超时」：看 SPT.Server.exe 窗口的报错（多半是 .NET 运行库或端口占用）
 - 想确认判定结果而不动手：双击 `dry_run.bat`
 
@@ -194,11 +203,25 @@ python test_solo_guard.py
 - **下载存档是快照**：下载之后又联机玩过但没再点下载 → 单机拿到的是上次下载点的进度（Fika 机制本身）
 - **物品数可能变少**：同期 `.BAK` 有 3731 物品、新下载档 3707 物品 → 联机期间的战损/消耗真实反映
 
+### 追加复盘（2026-10-09）：落点漂移被抓现行
+
+主人联机结束点「下载存档」后，档**没有**落在 `SPT\user\fika`，而是落在 `SPT_Runtime\user\fika`：
+
+| 落点 | mtime | 大小 | PMC 经验 | 结论 |
+|---|---|---|---|---|
+| `SPT_Runtime\user\fika\…` | 10-09 23:53 | 4.68 MB | **3,181,255** | ← 本次联机成果 |
+| `SPT_Runtime\user\profiles\…`（单机读的档） | 10-07 23:54 | 2.60 MB | 3,163,371 | 落后 17,884 |
+| `SPT\user\fika\…`（旧落点） | 10-07 22:41 | 2.59 MB | 3,131,361 | 更旧，只有兼容扫描才看得到 |
+
+原因：`SPT\` 现在只剩个 `user\fika` 空壳（旧安装结构残留），服务端已迁到 `SPT_Runtime\`，
+Fika 的下载落点跟着漂过去。若落点还写死一个 → 那份 4.68MB 的新档会被完全无视（白玩一场）。
+教训 → 改成**多落点扫描 + 经验判据（aid 归属 → PMC 经验 → Scav 经验 → mtime 兜底）**。
+
 ## 十一、机制来源（可复核）
 
 | 结论 | 出处 |
 |------|------|
-| 「下载存档」写到 `SPT\user\fika\<id>\<id>.json`（并留 `.json.BAK`） | `project-fika/Fika-Plugin` → `Fika.Core/UI/Patches/MenuTaskBar_Patch.cs` |
+| 「下载存档」写到「服务端根 \ user \ fika \ <id> \ <id>.json」（并留 `.json.BAK`）—— 服务端根随安装结构变，4.1.x 是 `SPT_Runtime\`，故实际落 `SPT_Runtime\user\fika` | `project-fika/Fika-Plugin` → `Fika.Core/UI/Patches/MenuTaskBar_Patch.cs` + 2026-10-09 本机实测 |
 | 服务端没改档案存储，走 SPT 原生 `SaveServer` | `project-fika/Fika-Server-CSharp`（`SaveProfileAsync` / `GetProfile`） |
 | 本地服务器 ServerId = `1721162719`，固定 `127.0.0.1:6969`，恒在服务器列表首位 | `sp-tarkov/launcher` → `SPTarkov.Core/Configuration/Server.cs` |
 | 自动连接逻辑：读 `PreferredProfile` → 连服务器 → 登录档案 | 同上 → `SPTarkov.Launcher/Pages/Home.razor:TryAutoConnect()` |

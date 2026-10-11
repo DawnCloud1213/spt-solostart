@@ -4,15 +4,18 @@
 spt_solostart.py — SPT 单机启动 + 联机存档自动同步
 
 【为什么需要它】
-Fika 联机结束后在游戏里点「下载存档」，档案落在：
-    <SPT根>\\SPT\\user\\fika\\<profileId>\\<profileId>.json
+Fika 联机结束后在游戏里点「下载存档」，档案落在「服务端根 \\ user \\ fika」：
+    <SPT根>\\SPT_Runtime\\user\\fika\\<profileId>\\<profileId>.json   ← SPT 4.1.x 现行落点
+    <SPT根>\\SPT\\user\\fika\\<profileId>\\<profileId>.json           ← 旧安装结构（服务端曾在游戏根的 SPT\\ 里）
 而单机（自建服）实际读/写的是：
     <SPT根>\\SPT_Runtime\\user\\profiles\\<profileId>.json
 两条路径不自动对接 → 单机启动总是读到联机之前的旧档，还被旧档回写钉死。
 
 【本脚本做什么】双击桌面「SPT单机启动」：
   1) 安全检查：SPT/游戏进程在跑 → 弹窗拦住，由主人决定「中止」还是「明知用旧档也要继续」
-  2) 选最新的「自己的档」：fika 下载档 / 本地档 / 可选额外目录（比 mtime）
+  2) 选最新的「自己的档」：全部「下载存档」候选落点 / 本地档 / 可选额外目录
+     —— 判据 = 账号 aid 归属校验 + PMC 经验(主) → scav 经验(次) → mtime(兜底)；
+        经验倒退一律拒覆盖（防复制/解压把旧档的时间戳刷成「最新」造成回滚）
   3) 比本地新 → 先备份本地档 → 覆盖到 profiles\\<id>.json
   4) 把 Launcher 自动连接目标指向「本地服务器」（ServerId=1721162719）
   5) 启服务端前先验 6969 端口占用者身份（必须就是本目录的 SPT.Server.exe）
@@ -48,10 +51,12 @@ from pathlib import Path
 # ==================== 默认配置（同目录 config.json 可覆盖） ====================
 SPT_PORT          = 6969                      # 本地 SPT 服务端口
 LOCAL_SERVER_ID   = "1721162719"              # SPT Launcher 内置「本地服务器」的 ServerId（sp-tarkov/launcher: Server.LocalServerId）
-PROFILE_ID        = ""                        # 留空=自动推导（LauncherSettings.PreferredProfile -> SPT/user/fika 最新目录）
+PROFILE_ID        = ""                        # 留空=自动推导（LauncherSettings.PreferredProfile -> 各「下载存档」落点里进度最新者）
 SYNC_PROFILE      = True                      # 是否启用存档同步
+FIKA_SOURCE_DIRS  = []                        # 「下载存档」额外落点（绝对路径或相对 SPT 根）；留空=只用内置候选
 EXTRA_SOURCE_DIRS = []                        # 额外存档来源目录（如 QQ 接收文件夹/下载夹），留空=只用游戏内「下载存档」落点
 ONLY_IF_NEWER     = True                      # 仅当来源比本地档新才覆盖（强烈建议保持 true）
+ALLOW_EXP_ROLLBACK = False                    # 允许「来源经验比本地低」也覆盖（默认 False=硬闸拒绝，防旧档回滚掉进度）
 BACKUP_DIR_REL    = "SPT_Runtime/user/profiles/backups_manual"
 KEEP_BACKUPS      = 20                        # 只保留最近 N 份本工具自建备份
 START_SERVER      = True
@@ -66,7 +71,15 @@ KEEP_LAUNCHER_BACKUPS   = 10                  # LauncherSettings 时间戳备份
 RUNTIME_REL           = Path("SPT_Runtime")
 LAUNCHER_SETTINGS_REL = RUNTIME_REL / "user" / "Launcher" / "LauncherSettings.json"
 PROFILES_REL          = RUNTIME_REL / "user" / "profiles"
-FIKA_REL              = Path("SPT") / "user" / "fika"
+# 游戏内「下载存档」候选落点 —— Fika 写在「服务端根 \ user \ fika」下，而服务端根随 SPT 安装结构变过：
+#   SPT 4.1.x：服务端在 SPT_Runtime\    → 落 SPT_Runtime\user\fika   （现行，实测 2026-10）
+#   旧结构    ：服务端在游戏根的 SPT\     → 落 SPT\user\fika
+# 三个全扫，按「内容进度」挑最新；config.fika_source_dirs 还能再追加别的（绝对路径或相对 SPT 根）。
+FIKA_SOURCE_DIRS_REL  = [
+    Path("SPT_Runtime") / "user" / "fika",
+    Path("SPT") / "user" / "fika",
+    Path("user") / "fika",
+]
 LOG_REL               = RUNTIME_REL / "user" / "sptappdata" / "spt_solostart_logs"
 SERVER_EXE_REL        = RUNTIME_REL / "SPT.Server.exe"
 LAUNCHER_EXE_REL      = RUNTIME_REL / "SPT.Launcher.exe"
@@ -138,7 +151,8 @@ def _ask_yes_no(text: str, title: str = "SPT 单机启动", default_yes: bool = 
 
 def load_config():
     global SPT_PORT, LOCAL_SERVER_ID, PROFILE_ID, SYNC_PROFILE, EXTRA_SOURCE_DIRS, \
-        ONLY_IF_NEWER, BACKUP_DIR_REL, KEEP_BACKUPS, START_SERVER, START_LAUNCHER, \
+        FIKA_SOURCE_DIRS, ONLY_IF_NEWER, ALLOW_EXP_ROLLBACK, BACKUP_DIR_REL, KEEP_BACKUPS, \
+        START_SERVER, START_LAUNCHER, \
         SERVER_WAIT_SECS, AUTO_CONNECT_LOCAL, SERVER_NEW_CONSOLE, \
         CONFIRM_ON_SKIP_PROCESS, PORT_OWNER_GUARD, KEEP_LAUNCHER_BACKUPS, CFG
     cfg_path = Path(__file__).resolve().parent / "config.json"
@@ -153,7 +167,9 @@ def load_config():
     PROFILE_ID         = str(CFG.get("profile_id", PROFILE_ID) or "")
     SYNC_PROFILE       = bool(CFG.get("sync_profile", SYNC_PROFILE))
     EXTRA_SOURCE_DIRS  = list(CFG.get("extra_source_dirs", EXTRA_SOURCE_DIRS) or [])
+    FIKA_SOURCE_DIRS   = list(CFG.get("fika_source_dirs", FIKA_SOURCE_DIRS) or [])
     ONLY_IF_NEWER      = bool(CFG.get("only_if_newer", ONLY_IF_NEWER))
+    ALLOW_EXP_ROLLBACK = bool(CFG.get("allow_exp_rollback", ALLOW_EXP_ROLLBACK))
     BACKUP_DIR_REL     = str(CFG.get("backup_dir", BACKUP_DIR_REL))
     KEEP_BACKUPS       = int(CFG.get("keep_backups", KEEP_BACKUPS))
     START_SERVER       = bool(CFG.get("start_server", START_SERVER))
@@ -331,6 +347,74 @@ def expand_dir(p: str) -> Path:
 
 # --------------------------- 存档候选与校验 ---------------------------
 
+def fika_roots():
+    """所有「下载存档」候选根（只返回真实存在的目录，去重保序）。
+
+    为什么是复数：Fika 把档写在「服务端根 \\ user \\ fika」，而服务端根随 SPT 安装结构变过
+    （4.1.x 在 SPT_Runtime\\，旧结构在游戏根的 SPT\\），所以内置多个候选 + config 追加。
+    """
+    roots, seen = [], set()
+    rels = list(FIKA_SOURCE_DIRS_REL) + [expand_dir(p) for p in FIKA_SOURCE_DIRS]
+    for rel in rels:
+        p = rel if rel.is_absolute() else (SPT_ROOT / rel)
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.is_dir():
+            roots.append(p)
+    return roots
+
+
+def read_profile_meta(path: Path):
+    """读一份档案的「元信息」；读不出（损坏 / 不是档案）返回 None。
+
+    aid = 账号号（防把别人的档同步进来）；pid = profileId；user = 昵称；
+    pmc_exp / scav_exp = 总经验（判「谁更新」的主判据）；mtime = 文件时间戳（兜底）。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "characters" not in data:
+            return None
+        ch = data.get("characters") or {}
+        info = data.get("info") or {}
+
+        def _exp(tag):
+            v = ((ch.get(tag) or {}).get("Info") or {}).get("Experience")
+            return int(v) if isinstance(v, (int, float)) else 0
+
+        return {
+            "aid": info.get("aid"),
+            "pid": info.get("id"),
+            "user": info.get("username") or "?",
+            "pmc_exp": _exp("pmc"),
+            "scav_exp": _exp("scav"),
+            "mtime": path.stat().st_mtime,
+        }
+    except Exception:
+        return None
+
+
+def profile_progress(meta):
+    """进度指纹：(PMC 经验, Scav 经验, mtime) —— 经验优先，mtime 只在前两项并列时兜底。
+
+    为什么不只看 mtime：复制 / 解压 / 拖动 / 改名 / 换盘都会重置文件时间戳，
+    旧档会冒充「最新」，覆盖上去 = 回滚掉主人的进度（掉经验、丢装备 + 物品）。
+    经验值正常游玩只增不减，才配当「谁更新」的判据。
+    """
+    if not meta:
+        return None
+    return (meta["pmc_exp"], meta["scav_exp"], meta["mtime"])
+
+
+def progress_label(meta) -> str:
+    """日志用的一行进度说明"""
+    if not meta:
+        return "（经验读不出）"
+    return f"PMC 经验 {meta['pmc_exp']:,} / Scav 经验 {meta['scav_exp']:,}"
+
+
 def valid_profile(path: Path, profile_id: str):
     """校验是不是一个合法且属于该 profileId 的档案；返回 (bool, 摘要字符串)"""
     try:
@@ -345,12 +429,14 @@ def valid_profile(path: Path, profile_id: str):
         return False, f"档案 id 不匹配（{pid}）"
     try:
         pmc = data["characters"]["pmc"]
-        level = (pmc.get("Info") or {}).get("Level", "?")
+        pinfo = pmc.get("Info") or {}
+        level = pinfo.get("Level", "?")
+        exp = int(pinfo.get("Experience") or 0)
         items = len((pmc.get("Inventory") or {}).get("items", []))
         quests = sum(1 for q in pmc.get("Quests", []) if q.get("status") == 4)
         inraid = data.get("inraid") or data.get("characters", {}).get("pmc", {}).get("InRaid")
         raid_note = "（战局中保存的档）" if inraid else ""
-        return True, f"Lv.{level} / 物品 {items} / 完成任务 {quests}{raid_note}"
+        return True, f"Lv.{level} / 经验 {exp:,} / 物品 {items} / 完成任务 {quests}{raid_note}"
     except Exception:
         return True, "(摘要读取失败)"
 
@@ -369,27 +455,43 @@ def resolve_profile_id(settings_path: Path):
                 return pid
         except Exception:
             pass
-    fika_root = SPT_ROOT / FIKA_REL
-    if fika_root.exists():
-        cands = []
-        for d in fika_root.iterdir():
-            if d.is_dir() and (d / f"{d.name}.json").exists():
-                cands.append((d / f"{d.name}.json", (d / f"{d.name}.json").stat().st_mtime))
-        if cands:
-            newest = max(cands, key=lambda x: x[1])[0]
-            log(f"profileId 取 fika 目录里最新目录: {newest.stem}")
-            return newest.stem
+    # 兜底：所有「下载存档」候选落点里，按进度挑最新的目录名当 profileId
+    fika_cands = []
+    for root in fika_roots():
+        for d in root.iterdir():
+            f = d / f"{d.name}.json"
+            if d.is_dir() and f.exists():
+                fika_cands.append(f)
+    if fika_cands:
+        best = max(fika_cands, key=lambda p: profile_progress(read_profile_meta(p)) or (0, 0, 0.0))
+        log(f"profileId 取「下载存档」候选里进度最新者: {best.stem}"
+            f"（来自 {best.parent.parent}）")
+        return best.stem
     return None
 
 
 def find_source_candidates(profile_id: str):
-    """返回 [(path, 来源说明)]，按 mtime 从新到旧"""
+    """返回 [(path, 来源说明, meta)]，按「进度」从新到旧（PMC 经验 → Scav 经验 → mtime）"""
     cands = []
 
-    # ① 游戏内「下载存档」落点
-    fika_file = SPT_ROOT / FIKA_REL / profile_id / f"{profile_id}.json"
-    if fika_file.exists():
-        cands.append((fika_file, "Fika 游戏内「下载存档」"))
+    # ① 游戏内「下载存档」落点：<服务端根>\\user\\fika\\<id>\\<id>.json —— 多个候选根全扫
+    for root in fika_roots():
+        try:
+            label = str(root.relative_to(SPT_ROOT))
+        except Exception:
+            label = str(root)
+        f = root / profile_id / f"{profile_id}.json"
+        if f.exists():
+            cands.append((f, f"Fika「下载存档」({label})"))
+            continue
+        # 目录名不是 profileId 时（Fika 改了命名 / 手动往里放档）：按内容匹配（限量）
+        subs = [d for d in root.iterdir() if d.is_dir() and (d / f"{d.name}.json").exists()]
+        subs.sort(key=lambda d: (d / f"{d.name}.json").stat().st_mtime, reverse=True)
+        for d in subs[:SCAN_MAX_FILES]:
+            p = d / f"{d.name}.json"
+            if valid_profile(p, profile_id)[0]:
+                cands.append((p, f"Fika「下载存档」({label}，按内容匹配)"))
+                break
 
     # ② 额外来源目录
     for raw in EXTRA_SOURCE_DIRS:
@@ -412,13 +514,15 @@ def find_source_candidates(profile_id: str):
                 cands.append((p, f"额外目录 {d.name}/（按内容匹配）"))
                 break
 
+    # 去重 + 按进度排序（经验优先，mtime 兜底）
     seen, uniq = set(), []
-    for p, src in sorted(cands, key=lambda x: x[0].stat().st_mtime, reverse=True):
+    for p, src in cands:
         key = str(p.resolve()).lower()
         if key in seen:
             continue
         seen.add(key)
-        uniq.append((p, src))
+        uniq.append((p, src, read_profile_meta(p)))
+    uniq.sort(key=lambda x: profile_progress(x[2]) or (0, 0, 0.0), reverse=True)
     return uniq
 
 
@@ -437,42 +541,62 @@ def prune_backups(backup_dir: Path, profile_id: str):
 
 
 def sync_profile(profile_id: str):
-    """核心：把最新的自己的档同步到单机实际读取路径"""
+    """核心：把「最新的自己的档」同步到单机实际读取路径。
+
+    新旧判据（别再退回纯 mtime）：
+      · 归属：来源与本地档必须同一账号（info.aid 一致）→ 防把别人的档同步进来
+      · 进度：PMC 经验(主) → Scav 经验(次) → mtime(兜底)
+      · 硬闸：来源经验比本地低 → 默认拒绝覆盖（防复制/解压把旧档时间戳刷「新」造成回滚）
+    """
     local_path = SPT_ROOT / PROFILES_REL / f"{profile_id}.json"
     backup_dir = SPT_ROOT / expand_dir(BACKUP_DIR_REL)
 
     if not (SPT_ROOT / PROFILES_REL).is_dir():
         log(f"!! 找不到档案目录: {SPT_ROOT / PROFILES_REL}")
         return None
+
+    local_meta = read_profile_meta(local_path) if local_path.exists() else None
     if not local_path.exists():
         log(f"本地无该档案，将直接写入: {local_path.name}")
     else:
-        log(f"本地档: {local_path.name} "
-            f"({local_path.stat().st_size} B, {datetime.fromtimestamp(local_path.stat().st_mtime):%Y-%m-%d %H:%M})")
+        log(f"本地档: {local_path.name} ({local_path.stat().st_size} B, "
+            f"{datetime.fromtimestamp(local_path.stat().st_mtime):%Y-%m-%d %H:%M}, "
+            f"{progress_label(local_meta)})")
 
     cands = find_source_candidates(profile_id)
     if not cands:
-        log("没找到任何可用的存档来源（游戏内「下载存档」落点为空，额外目录也没匹配）→ 不覆盖")
+        log("没找到任何可用的存档来源（各「下载存档」落点为空，额外目录也没匹配）→ 不覆盖")
         return None
 
-    log("候选来源（新→旧）:")
-    for p, src in cands:
-        log(f"  - [{src}] {p} ({p.stat().st_size} B, "
-            f"{datetime.fromtimestamp(p.stat().st_mtime):%Y-%m-%d %H:%M})")
+    log("候选来源（按进度 新→旧）:")
+    for p, src, m in cands:
+        delta = ""
+        if local_meta and m:
+            d = m["pmc_exp"] - local_meta["pmc_exp"]
+            delta = f" | 比本地 {'+' if d >= 0 else ''}{d:,}"
+        log(f"  - [{src}] {p.name} ({p.stat().st_size} B, "
+            f"{datetime.fromtimestamp(p.stat().st_mtime):%Y-%m-%d %H:%M}, "
+            f"{progress_label(m)}{delta})")
 
-    src_path, src_desc = cands[0]
-    ok, summary = valid_profile(src_path, profile_id)
-    if not ok:
-        log(f"!! 最新候选不是合法档案: {summary} → 拒绝覆盖")
-        for p, d in cands[1:]:
-            ok2, s2 = valid_profile(p, profile_id)
-            if ok2:
-                src_path, src_desc, summary = p, d, s2
-                log(f"回退使用候选: {p} ({s2})")
-                break
-        else:
-            log("!! 所有候选均不可用，放弃同步")
-            return None
+    # 挑第一个「合法 + 属于同一账号」的候选（候选已按进度排序，所以就是最优的那个）
+    src_path = src_desc = summary = None
+    for p, d, m in cands:
+        ok, s = valid_profile(p, profile_id)
+        if not ok:
+            log(f"  (跳过非法候选 {p.name}: {s})")
+            continue
+        if local_meta and m and local_meta.get("aid") and m.get("aid") \
+                and local_meta["aid"] != m["aid"]:
+            log(f"  (跳过串档候选 {p.name}: 账号 aid {m.get('aid')} / {m.get('user')} "
+                f"≠ 本地 {local_meta['aid']} / {local_meta.get('user')})")
+            continue
+        src_path, src_desc, summary = p, d, s
+        break
+    if not src_path:
+        log("!! 所有候选均不可用（非法档案或不属于本账号），放弃同步")
+        return None
+
+    src_meta = read_profile_meta(src_path)
 
     if src_path.resolve() == local_path.resolve():
         log(f"最新来源就是本地档，无需同步（{summary}）")
@@ -482,8 +606,26 @@ def sync_profile(profile_id: str):
         log(f"来源与本地档内容一致，无需同步（{summary}）")
         return local_path
 
-    if local_path.exists() and ONLY_IF_NEWER and src_path.stat().st_mtime <= local_path.stat().st_mtime:
-        log("本地档更新（可能刚单机玩过），保持不动，不覆盖")
+    if local_meta and src_meta:
+        d = src_meta["pmc_exp"] - local_meta["pmc_exp"]
+        log(f"  进度对比：本地 PMC {local_meta['pmc_exp']:,} → 来源 PMC {src_meta['pmc_exp']:,}"
+            f"（{'+' if d >= 0 else ''}{d:,}）")
+
+        # 硬闸：经验倒退 = 旧档 / 时间戳被复制筛新，默认拒绝覆盖
+        if src_meta["pmc_exp"] < local_meta["pmc_exp"]:
+            if not ALLOW_EXP_ROLLBACK:
+                log(f"!! 来源 PMC 经验比本地低 {abs(d):,} → 判定为旧档（或时间戳失真），拒绝覆盖；"
+                    f"确要强推请把 config 的 allow_exp_rollback 设为 true")
+                return local_path
+            log("   （allow_exp_rollback=true → 放行经验倒退覆盖）")
+
+        if ONLY_IF_NEWER and profile_progress(src_meta) <= profile_progress(local_meta):
+            log("本地档不落后（经验相同且时间也不更新），保持不动，不覆盖")
+            return local_path
+    elif local_path.exists() and ONLY_IF_NEWER \
+            and src_path.stat().st_mtime <= local_path.stat().st_mtime:
+        # 经验读不出时退回 mtime 比较
+        log("（经验读不出，退回 mtime 比较）本地档更新，保持不动，不覆盖")
         return local_path
 
     if DRY_RUN:

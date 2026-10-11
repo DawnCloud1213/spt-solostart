@@ -1,9 +1,13 @@
 {
   "_comment": "spt_solostart 配置。脚本位于 <SPT根>\\SPTSoloStart\\，SPT_ROOT 自动推导（=脚本上一级），换电脑只需把整个 SPTSoloStart 文件夹随游戏搬走。",
+  "_comment_judge": "「哪个档更新」判据：账号 aid 归属校验 + PMC 经验(主) → Scav 经验(次) → mtime(兜底)。不用纯 mtime——复制/解压会把旧档时间戳刷成「最新」造成回滚。",
+  "_comment_fika": "fika_source_dirs：「下载存档」额外落点（绝对路径或相对 SPT 根）。内置已含 SPT_Runtime/user/fika、SPT/user/fika、user/fika 三处，一般不用填。",
   "profile_id": "",
   "sync_profile": true,
+  "fika_source_dirs": [],
   "extra_source_dirs": [],
   "only_if_newer": true,
+  "allow_exp_rollback": false,
   "confirm_on_skip_process": true,
   "port_owner_guard": true,
   "backup_dir": "SPT_Runtime/user/profiles/backups_manual",
